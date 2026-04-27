@@ -26,6 +26,7 @@ import java.io.Closeable
 import java.security.SecureRandom
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Sender-side BLE advertiser that emits the Quick Share service-data pulse
@@ -67,6 +68,15 @@ public class BleAdvertiser internal constructor(
     private val payloadFactory: () -> ByteArray,
     private val now: () -> Long,
 ) {
+    /**
+     * The currently-live handle, if any. [start] swaps in a new handle
+     * after closing the previous one (re-entrancy guard); [close] paths
+     * use [java.util.concurrent.atomic.AtomicReference.compareAndSet] so
+     * a late `close` from a stale handle doesn't clobber a fresh
+     * advertisement that the same instance opened in the meantime.
+     */
+    private val active: AtomicReference<BleAdvertiseHandleImpl?> = AtomicReference(null)
+
     /**
      * Production constructor. Wires up the Android `BluetoothManager` and
      * a fresh [SecureRandom] for the payload's random tail.
@@ -149,10 +159,6 @@ public class BleAdvertiser internal constructor(
         }
         return advertiser
     }
-
-    private val active: java.util.concurrent.atomic.AtomicReference<BleAdvertiseHandleImpl?> =
-        java.util.concurrent.atomic
-            .AtomicReference(null)
 
     /**
      * Internal indirection over `BluetoothManager.adapter.bluetoothLeAdvertiser`
