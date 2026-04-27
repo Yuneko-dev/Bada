@@ -38,35 +38,20 @@ import java.security.SecureRandom
 /**
  * Internal lifecycle driver for [InboundConnection].
  *
- * Lives in its own file so [InboundConnection] can stay a small
- * public surface focused on the API contract, while the I/O loop and
- * its state-machine dispatch live here.
- *
- * Owns the per-connection mutable state:
- *  - [framedConnection] -- the length-prefixed transport, opened in
- *    [runLifecycle] and closed via [tearDown].
- *  - [secureChannel] -- the encrypted channel; populated after UKEY2.
- *  - [fsm] -- the negotiation state machine; populated after the
- *    unencrypted handshake.
- *  - [assembler] -- the BYTES/FILE payload reassembler.
- *  - announced/received tracking across the receive loop.
- *
- * The driver is consumed once by [InboundConnection.run] and then
- * discarded; there is no resume / re-run path.
+ * Owns the per-connection mutable state: framed transport, secure
+ * channel, FSM, payload assembler, plus announced/received tracking.
+ * Consumed once by [InboundConnection.run] and discarded; there is no
+ * resume / re-run path.
  *
  * ### Receive-loop concurrency
  *
- * The loop has two input sources:
- *  1. Inbound wire frames from the [SecureChannel].
- *  2. External events (consent, cancel) from a [Channel].
- *
  * `kotlinx.coroutines.selects.select` cannot directly suspend on
- * `SecureChannel.receiveOfflineFrame()` (it has no `onReceive`-style
- * SelectClause). The driver works around this by running a small
- * **inbound pump coroutine** that reads frames sequentially and
- * forwards them onto a channel; the main loop then `select`s between
- * that channel and [externalEvents]. The pump terminates on
- * [EndOfFrameStream] (clean half-close) or on cancellation.
+ * `SecureChannel.receiveOfflineFrame()` (no `onReceive`-style
+ * SelectClause). The driver therefore runs a small **inbound pump
+ * coroutine** that reads frames sequentially and forwards them onto a
+ * channel; the main loop then `select`s between that channel and
+ * [externalEvents]. The pump terminates on [EndOfFrameStream] (clean
+ * half-close) or on cancellation.
  */
 @Suppress(
     "TooManyFunctions", // The lifecycle inherently has many phases; each is one function for readability.
@@ -87,11 +72,7 @@ internal class InboundConnectionDriver(
     /** Set once the introduction has been observed; null before that. */
     private var transferMetadata: TransferMetadata? = null
 
-    /**
-     * Map from announced `payload_id` to its expected payload type.
-     * Populated when `IntroductionReceived` arrives; used to know
-     * when the receive loop has drained every announced item.
-     */
+    /** Map from announced `payload_id` to its expected payload type. */
     private val announced: MutableMap<Long, PayloadHeader.PayloadType> = HashMap()
 
     /** Successfully received items, in announcement order. */
@@ -109,12 +90,9 @@ internal class InboundConnectionDriver(
     private var currentItemType: PayloadHeader.PayloadType? = null
 
     /**
-     * 4-digit confirmation PIN derived from the UKEY2 `authString`.
-     * Set once in [runLifecycle] after the handshake completes;
-     * referenced by [handleIntroduction] when building the
-     * [TransferMetadata]. Empty string before the handshake so that
-     * an early-failure code path that surfaces the PIN cannot leak
-     * uninitialised state.
+     * 4-digit confirmation PIN derived from the UKEY2 `authString`. Set
+     * in [runLifecycle] after the handshake; empty before the handshake
+     * so an early-failure code path cannot leak uninitialised state.
      */
     private var pin: String = ""
 
@@ -169,13 +147,10 @@ internal class InboundConnectionDriver(
     }
 
     /**
-     * Tear down all owned resources. Safe to call multiple times;
-     * each closeable swallows its own IOException so a single failing
-     * close cannot leak the others.
-     *
-     * Closes in dependency order (top of stack first): SecureChannel,
-     * FramedConnection (which closes the underlying socket), and
-     * finally the assembler so partial FILE writes are flushed.
+     * Tear down all owned resources. Safe to call multiple times; each
+     * closeable swallows its own IOException so a single failing close
+     * cannot leak the others. Closes in dependency order (SecureChannel,
+     * FramedConnection / socket, then assembler).
      */
     fun tearDown() {
         runCatching { secureChannel?.close() }
@@ -194,11 +169,7 @@ internal class InboundConnectionDriver(
     ): InboundResult =
         coroutineScope {
             val wireChannel: Channel<WireMessage> = Channel(Channel.UNLIMITED)
-            val pumpJob: Job =
-                launch {
-                    runInboundPump(channel, wireChannel)
-                }
-
+            val pumpJob: Job = launch { runInboundPump(channel, wireChannel) }
             try {
                 dispatchLoop(channel, fsm, wireChannel)
             } finally {
@@ -207,16 +178,11 @@ internal class InboundConnectionDriver(
         }
 
     /**
-     * Inbound pump. Reads frames from the [SecureChannel] in a loop
-     * and forwards them onto [wireChannel]. On clean half-close
-     * (peer goes away between frames) emits [WireMessage.Closed]; on
-     * any other I/O failure emits [WireMessage.Error].
-     *
-     * The pump never closes [wireChannel] itself -- the dispatch loop
-     * cancels the pump as part of its `finally` block, which the
-     * coroutine framework converts into a CancellationException at
-     * the next suspend point. Closing the [secureChannel] is enough
-     * to break out of `receiveOfflineFrame`.
+     * Inbound pump. Reads frames from the [SecureChannel] in a loop and
+     * forwards them onto [wireChannel]. On clean half-close emits
+     * [WireMessage.Closed]; on any other I/O failure emits
+     * [WireMessage.Error]. Closing the [SecureChannel] is enough to
+     * break out of `receiveOfflineFrame`.
      */
     @Suppress("TooGenericExceptionCaught", "SwallowedException")
     private suspend fun runInboundPump(
@@ -238,9 +204,9 @@ internal class InboundConnectionDriver(
     }
 
     /**
-     * Main dispatch loop -- runs until a terminal state is reached.
-     * Selects between wire frames and external events; the FSM is
-     * the source of truth for termination.
+     * Dispatch loop -- runs until a terminal state is reached. Selects
+     * between wire frames and external events; the FSM is the source of
+     * truth for termination.
      */
     @Suppress("ReturnCount", "CyclomaticComplexMethod")
     private suspend fun dispatchLoop(
@@ -270,10 +236,7 @@ internal class InboundConnectionDriver(
         }
     }
 
-    /**
-     * Handle one driver-level event. Returns a non-null
-     * [InboundResult] when the event triggered termination.
-     */
+    /** Handle one driver-level event. Non-null result triggers termination. */
     private suspend fun handleDriverEvent(
         channel: SecureChannel,
         fsm: InboundSharingFsm,
@@ -285,7 +248,7 @@ internal class InboundConnectionDriver(
                 null
             }
             is DriverEvent.Wire -> handleInboundOfflineFrame(channel, fsm, event.frame)
-            DriverEvent.PeerClosed -> handlePeerClosed(channel)
+            DriverEvent.PeerClosed -> handlePeerClosed()
             is DriverEvent.PumpError -> {
                 val reason = "Inbound pump error: ${event.cause::class.simpleName}: ${event.cause.message}"
                 mutableState.value = InboundConnectionState.Failed(reason)
@@ -294,9 +257,9 @@ internal class InboundConnectionDriver(
         }
 
     /**
-     * Handles one inbound `OfflineFrame` from the SecureChannel.
-     * Returns a non-null [InboundResult] when the frame caused a
-     * terminal transition; null to continue the receive loop.
+     * Handles one inbound `OfflineFrame` from the SecureChannel. Returns
+     * a non-null [InboundResult] when the frame caused a terminal
+     * transition; null to continue the receive loop.
      */
     @Suppress("ReturnCount") // One return per frame-shape branch keeps the dispatch readable.
     private suspend fun handleInboundOfflineFrame(
@@ -327,9 +290,9 @@ internal class InboundConnectionDriver(
     }
 
     /**
-     * Decode a [PayloadEvent] into FSM events / received items /
-     * progress updates. Returns a terminal [InboundResult] when the
-     * event drove the connection to completion.
+     * Decode a [PayloadEvent] into FSM events / received items / progress.
+     * Returns a terminal [InboundResult] when the event drove the
+     * connection to completion.
      */
     @Suppress("ReturnCount")
     private suspend fun handlePayloadEvent(
@@ -339,7 +302,7 @@ internal class InboundConnectionDriver(
     ): InboundResult? {
         when (event) {
             is PayloadEvent.BytesComplete -> return handleBytesComplete(channel, fsm, event)
-            is PayloadEvent.FileComplete -> return handleFileComplete(channel, event)
+            is PayloadEvent.FileComplete -> return handleFileComplete(event)
             is PayloadEvent.Progress -> updateProgress(event)
             is PayloadEvent.Ignored -> Unit
         }
@@ -358,7 +321,6 @@ internal class InboundConnectionDriver(
     ): InboundResult? {
         val announcedType = announced[event.payloadId]
         if (announcedType != null) {
-            // It's a text payload from the announced manifest.
             received += ReceivedItem.Text(payloadId = event.payloadId, data = event.data)
             currentItemPayloadId = null
             currentItemType = null
@@ -372,15 +334,8 @@ internal class InboundConnectionDriver(
         return null
     }
 
-    /**
-     * FILE payloads are always announced. Look up the header the
-     * assembler surfaced and append the result.
-     */
-    @Suppress("UNUSED_PARAMETER")
-    private suspend fun handleFileComplete(
-        channel: SecureChannel,
-        event: PayloadEvent.FileComplete,
-    ): InboundResult? {
+    /** FILE payloads are always announced. */
+    private suspend fun handleFileComplete(event: PayloadEvent.FileComplete): InboundResult? {
         received +=
             ReceivedItem.File(
                 payloadId = event.payloadId,
@@ -390,33 +345,22 @@ internal class InboundConnectionDriver(
         currentItemPayloadId = null
         currentItemType = null
         updateProgressForCompletion()
-        return maybeFinalize(channel)
+        return maybeFinalize(secureChannel ?: error("SecureChannel must be set"))
     }
 
     /**
-     * Update [InboundConnectionState.Receiving] progress in response
-     * to a non-final DATA chunk. No-op if the FSM has not yet
-     * accepted (chunks during negotiation are BYTES negotiation
-     * frames, which we do not surface as user-visible progress).
+     * Update [InboundConnectionState.Receiving] in response to a
+     * non-final DATA chunk. No-op for unannounced (negotiation) BYTES
+     * payloads.
      */
     private fun updateProgress(event: PayloadEvent.Progress) {
-        // Only bump progress for announced items. Negotiation BYTES
-        // payloads also produce Progress events but we do not surface
-        // them; they are tiny and the UI's progress bar would jitter.
         if (event.payloadId !in announced) return
         currentItemPayloadId = event.payloadId
         currentItemType = event.type
-        // bytesReceived is tracked at completion granularity (see
-        // updateProgressForCompletion) for simplicity. Here we update
-        // the StateFlow with the in-flight ratio for a single item so
-        // the UI can render fine-grained progress.
         publishReceiving(itemBytes = event.bytesReceived)
     }
 
-    /**
-     * Finalize a completed announced item: bump the cumulative byte
-     * counter and republish the Receiving state.
-     */
+    /** Bump the cumulative byte counter and republish. */
     private fun updateProgressForCompletion() {
         val last = received.lastOrNull() ?: return
         val itemSize =
@@ -428,13 +372,6 @@ internal class InboundConnectionDriver(
         publishReceiving(itemBytes = 0L)
     }
 
-    /**
-     * Push a fresh [InboundConnectionState.Receiving] snapshot onto
-     * the StateFlow.
-     *
-     * @param itemBytes Bytes received for the *current* in-flight
-     *   item (used for fine-grained progress between completions).
-     */
     private fun publishReceiving(itemBytes: Long) {
         mutableState.value =
             InboundConnectionState.Receiving(
@@ -446,9 +383,9 @@ internal class InboundConnectionDriver(
     }
 
     /**
-     * If every announced item has arrived, close the connection
-     * gracefully (Disconnection + close). Returns the terminal
-     * [InboundResult.Completed] in that case; null otherwise.
+     * If every announced item has arrived, close gracefully. Returns
+     * the terminal [InboundResult.Completed] in that case; null
+     * otherwise.
      */
     private suspend fun maybeFinalize(channel: SecureChannel): InboundResult? {
         if (received.size != announced.size || announced.isEmpty()) return null
@@ -463,14 +400,11 @@ internal class InboundConnectionDriver(
     }
 
     /**
-     * Peer cleanly closed the TCP half-channel between frames.
-     * Treat as completion if every announced item arrived; otherwise
-     * the peer is bailing mid-transfer (cancel-ish).
+     * Peer cleanly closed the TCP half-channel between frames. Treat as
+     * completion if every announced item arrived; otherwise cancel-ish.
      */
-    @Suppress("UNUSED_PARAMETER")
-    private fun handlePeerClosed(channel: SecureChannel): InboundResult =
+    private fun handlePeerClosed(): InboundResult =
         if (received.size == announced.size && announced.isNotEmpty()) {
-            // Don't send Disconnection -- the peer already closed.
             val items = received.toList()
             mutableState.value = InboundConnectionState.Completed(items)
             InboundResult.Completed(items)
@@ -480,9 +414,12 @@ internal class InboundConnectionDriver(
         }
 
     /**
-     * Apply an FSM effect list: send frames, transition state, etc.
+     * Apply an FSM effect list. The FSM guarantees `SendFrame` precedes
+     * any terminal notification in the same list, so iterating
+     * top-to-bottom puts outbound bytes onto the wire before the
+     * connection tears down.
      */
-    @Suppress("CyclomaticComplexMethod") // Effects are a small enum; one branch per effect is the cleanest dispatch.
+    @Suppress("CyclomaticComplexMethod") // One branch per SharingFsmEffect variant is the cleanest dispatch.
     private suspend fun applyEffects(
         channel: SecureChannel,
         effects: List<SharingFsmEffect>,
@@ -493,17 +430,10 @@ internal class InboundConnectionDriver(
                 is SharingFsmEffect.IntroductionReceived -> handleIntroduction(effect)
                 SharingFsmEffect.ReadyToReceivePayloads -> publishInitialReceiving()
                 is SharingFsmEffect.Rejected -> {
-                    // Receiver does not produce Rejected -- but if it
-                    // ever does (defensive), publish the state.
                     mutableState.value = InboundConnectionState.Rejected
                 }
                 SharingFsmEffect.Cancelled -> {
-                    // FSM signalled cancel. The wire-level send (if any)
-                    // already happened earlier in this effect list via
-                    // SendFrame. Distinguish reject (we just sent a
-                    // RESPONSE{REJECT}) from generic cancel.
-                    val rejected =
-                        effects.any { it is SharingFsmEffect.Rejected }
+                    val rejected = effects.any { it is SharingFsmEffect.Rejected }
                     if (rejected) {
                         mutableState.value = InboundConnectionState.Rejected
                     } else if (mutableState.value !is InboundConnectionState.Cancelled) {
@@ -521,10 +451,9 @@ internal class InboundConnectionDriver(
 
     /**
      * Encode a Sharing.Nearby.Frame as a BYTES payload and push every
-     * resulting [OfflineFrame] through the SecureChannel.
-     *
-     * Each negotiation BYTES payload uses a fresh random `payload_id`
-     * (`SecureRandom.nextLong()` matches NearDrop). A reused id would
+     * resulting [OfflineFrame] through the SecureChannel. Each
+     * negotiation BYTES payload uses a fresh random `payload_id`
+     * (`SecureRandom.nextLong()` matches NearDrop); reusing an id would
      * collide with an in-flight payload on the peer's reassembler.
      */
     private suspend fun sendSharingFrame(
@@ -558,10 +487,7 @@ internal class InboundConnectionDriver(
         mutableState.value = InboundConnectionState.WaitingForUserConsent(metadata)
     }
 
-    /**
-     * On `ReadyToReceivePayloads`, surface the initial Receiving
-     * state so the UI can render a 0% progress bar immediately.
-     */
+    /** Surface the initial Receiving snapshot so the UI can render 0% immediately. */
     private fun publishInitialReceiving() {
         mutableState.value =
             InboundConnectionState.Receiving(
@@ -572,10 +498,7 @@ internal class InboundConnectionDriver(
             )
     }
 
-    /**
-     * Drain one [ExternalEvent] (user consent or cancel) into the
-     * FSM.
-     */
+    /** Drain one [ExternalEvent] (user consent or cancel) into the FSM. */
     private suspend fun handleExternalEvent(
         channel: SecureChannel,
         fsm: InboundSharingFsm,
@@ -593,32 +516,26 @@ internal class InboundConnectionDriver(
 
     /**
      * Resolve the FSM's terminal state into a final [InboundResult].
-     * Called when the receive loop notices the FSM transitioned to
+     * Called when the dispatch loop notices the FSM transitioned to
      * [InboundSharingState.Disconnected].
      */
     private suspend fun terminalResultFromState(): InboundResult =
         when (val s = mutableState.value) {
             is InboundConnectionState.Completed -> InboundResult.Completed(s.items)
             InboundConnectionState.Rejected -> {
-                // Receiver rejected -- send Disconnection so the peer
-                // sees a clean teardown rather than an abrupt close.
-                // Best-effort: if the SecureChannel is already broken
-                // (peer hung up first) we ignore the failure.
+                // Send Disconnection so the peer sees a clean teardown
+                // rather than an abrupt close. Best-effort: if the
+                // SecureChannel is broken (peer hung up first) we
+                // ignore the failure.
                 runCatching { secureChannel?.sendOfflineFrame(OfflineFrames.disconnection()) }
                 InboundResult.Rejected
             }
             is InboundConnectionState.Cancelled -> {
-                // Local cancel: also send Disconnection. Peer cancel
-                // already saw our CancelFrame from the FSM and will
-                // close on their side; sending Disconnection is still
-                // the polite signal NearDrop emits.
                 runCatching { secureChannel?.sendOfflineFrame(OfflineFrames.disconnection()) }
                 InboundResult.Cancelled(s.cause)
             }
             is InboundConnectionState.Failed -> InboundResult.Failed(s.reason)
             else -> {
-                // Unexpected: FSM is Disconnected but the StateFlow is
-                // still in a non-terminal state.
                 val reason = "FSM disconnected without a terminal state (state=$s)"
                 mutableState.value = InboundConnectionState.Failed(reason)
                 InboundResult.Failed(reason)
@@ -638,46 +555,4 @@ internal class InboundConnectionDriver(
         val bytes = transport.receiveFrame()
         return OfflineFrame.parseFrom(bytes)
     }
-}
-
-/**
- * Internal: the dispatch-loop event union.
- */
-internal sealed interface DriverEvent {
-    /** A wire-level OfflineFrame arrived on the SecureChannel. */
-    data class Wire(
-        val frame: OfflineFrame,
-    ) : DriverEvent
-
-    /** A user-supplied event (consent / cancel) arrived on the channel. */
-    data class External(
-        val event: ExternalEvent,
-    ) : DriverEvent
-
-    /** The peer closed the TCP connection cleanly. */
-    object PeerClosed : DriverEvent
-
-    /** The inbound pump terminated due to an unexpected error. */
-    data class PumpError(
-        val cause: Throwable,
-    ) : DriverEvent
-}
-
-/**
- * Internal: messages the inbound pump pushes onto the wire channel
- * for the dispatch loop to consume.
- */
-internal sealed interface WireMessage {
-    /** A successfully decoded OfflineFrame. */
-    data class Frame(
-        val frame: OfflineFrame,
-    ) : WireMessage
-
-    /** Peer closed the connection cleanly between frames. */
-    object Closed : WireMessage
-
-    /** The pump caught an unexpected I/O failure. */
-    data class Error(
-        val cause: Throwable,
-    ) : WireMessage
 }
