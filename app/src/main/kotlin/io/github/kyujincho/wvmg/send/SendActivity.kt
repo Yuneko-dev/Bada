@@ -273,12 +273,21 @@ public class SendActivity : AppCompatActivity() {
 
         connectionJob =
             lifecycleScope.launch {
-                launch {
-                    connection.state.collect { state ->
-                        renderConnectionState(state, peer)
+                // Collect the state flow inside a child job so we can
+                // cancel it once `run` returns. StateFlow.collect never
+                // completes on its own, and leaving it hot past the
+                // terminal state would leak the activity scope.
+                val collector =
+                    launch {
+                        connection.state.collect { state ->
+                            renderConnectionState(state, peer)
+                        }
                     }
+                try {
+                    connection.run(files)
+                } finally {
+                    collector.cancel()
                 }
-                connection.run(files)
             }
     }
 
