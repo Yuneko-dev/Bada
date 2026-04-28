@@ -302,7 +302,12 @@ public class BleQuickShareScanner internal constructor(
      */
     public fun setScanMode(mode: Int): Boolean =
         synchronized(lifecycleLock) {
-            if (mode == currentScanMode && registration != null) return@synchronized true
+            // No-op when the requested mode equals the current one.
+            // Covers both "already scanning at this mode" and "idle and
+            // mode is already the pinned-for-next-start value" — the
+            // latter avoids a noisy "BALANCED -> BALANCED" logcat line
+            // at first observer attach.
+            if (mode == currentScanMode) return@synchronized true
             val previous = currentScanMode
             currentScanMode = mode
 
