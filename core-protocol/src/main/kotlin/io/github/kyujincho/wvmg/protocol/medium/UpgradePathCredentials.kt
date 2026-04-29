@@ -193,4 +193,60 @@ public sealed interface UpgradePathCredentials {
             private const val HEX_DIGITS: String = "0123456789ABCDEF"
         }
     }
+
+    /**
+     * Wi-Fi Aware (NAN) credentials — the bring-up parameters that the
+     * subscriber (sender) needs in order to request a Wi-Fi Aware data
+     * path to the publisher (receiver) after the discovery match.
+     *
+     * Wi-Fi Aware is one of the higher-throughput Phase 4 mediums when
+     * supported by the chipset. Discovery uses a publish/subscribe
+     * service-name pairing; the data path is brought up out-of-band by
+     * exchanging a passphrase (or PMK) and an IPv6 link-local address +
+     * port over the framework's `BANDWIDTH_UPGRADE_NEGOTIATION` channel.
+     *
+     * @param serviceName ASCII service name the publisher used in
+     *   `PublishConfig.setServiceName(...)`. Subscriber must use the
+     *   same string when calling `subscribe(...)`.
+     * @param port Receiver-side TCP port bound to the Wi-Fi Aware
+     *   network interface. The sender connects to this on the IPv6
+     *   address obtained from the data-path callback.
+     * @param ipv6Address IPv6 address bytes (16 bytes, link-local
+     *   `fe80::/10`) of the publisher's Wi-Fi Aware interface. Sent
+     *   alongside the port so the subscriber doesn't have to derive it
+     *   from the peer handle. Senders typically need to combine this
+     *   with the network's scope id (interface index) when constructing
+     *   an `Inet6Address`.
+     * @param passphrase Out-of-band passphrase used to secure the
+     *   Wi-Fi Aware data path (8–63 ASCII chars per
+     *   `WifiAwareNetworkSpecifier.Builder.setPskPassphrase`). Must
+     *   match on both sides; the receiver generates a fresh one per
+     *   upgrade.
+     */
+    public data class WifiAware(
+        val serviceName: String,
+        val port: Int,
+        val ipv6Address: ByteArray,
+        val passphrase: String,
+    ) : UpgradePathCredentials {
+        override val medium: Medium = Medium.WIFI_AWARE
+
+        // ByteArray equality, same rationale as WifiLan above.
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is WifiAware) return false
+            return serviceName == other.serviceName &&
+                port == other.port &&
+                passphrase == other.passphrase &&
+                ipv6Address.contentEquals(other.ipv6Address)
+        }
+
+        override fun hashCode(): Int {
+            var result = serviceName.hashCode()
+            result = 31 * result + port
+            result = 31 * result + ipv6Address.contentHashCode()
+            result = 31 * result + passphrase.hashCode()
+            return result
+        }
+    }
 }

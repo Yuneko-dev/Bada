@@ -101,6 +101,115 @@ class BandwidthUpgradeFramesTest {
     }
 
     @Test
+    fun `upgradePathAvailable carries Wi-Fi Aware credentials in WifiAwareCredentials slot`() {
+        val ipv6 =
+            byteArrayOf(
+                0xFE.toByte(),
+                0x80.toByte(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0x12,
+                0x34,
+                0xAB.toByte(),
+                0xCD.toByte(),
+                0xEF.toByte(),
+                0x01,
+                0x02,
+            )
+        val frame =
+            BandwidthUpgradeFrames.upgradePathAvailable(
+                UpgradePathCredentials.WifiAware(
+                    serviceName = "wvmg-quickshare-aware",
+                    ipv6Address = ipv6,
+                    port = 8443,
+                    passphrase = "abcdefghij0123456789",
+                ),
+            )
+        val parsed = parse(frame)
+        assertThat(parsed.upgradePathInfo.medium.number).isEqualTo(Medium.WIFI_AWARE.wireNumber)
+        assertThat(parsed.upgradePathInfo.hasWifiAwareCredentials()).isTrue()
+        assertThat(parsed.upgradePathInfo.wifiAwareCredentials.serviceId).isEqualTo("wvmg-quickshare-aware")
+        assertThat(parsed.upgradePathInfo.wifiAwareCredentials.password).isEqualTo("abcdefghij0123456789")
+
+        // service_info packs the IPv6 (16 bytes) and the port
+        // (zero-padded to 4 bytes, big-endian) into a 20-byte payload.
+        val serviceInfo =
+            parsed.upgradePathInfo.wifiAwareCredentials.serviceInfo
+                .toByteArray()
+        assertThat(serviceInfo).hasLength(20)
+        assertThat(serviceInfo.copyOfRange(0, 16)).isEqualTo(ipv6)
+        // Port 8443 = 0x20FB; high two bytes zero, then 0x20, 0xFB.
+        assertThat(serviceInfo[16]).isEqualTo(0.toByte())
+        assertThat(serviceInfo[17]).isEqualTo(0.toByte())
+        assertThat(serviceInfo[18]).isEqualTo(0x20.toByte())
+        assertThat(serviceInfo[19]).isEqualTo(0xFB.toByte())
+    }
+
+    @Test
+    fun `decodeCredentials round-trips Wi-Fi Aware credentials`() {
+        val ipv6 =
+            byteArrayOf(
+                0xFE.toByte(),
+                0x80.toByte(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0xAA.toByte(),
+                0xBB.toByte(),
+                0xCC.toByte(),
+                0xDD.toByte(),
+                0xEE.toByte(),
+                0xFF.toByte(),
+                0x01,
+                0x23,
+            )
+        val original =
+            UpgradePathCredentials.WifiAware(
+                serviceName = "wvmg-quickshare-aware",
+                ipv6Address = ipv6,
+                port = 4242,
+                passphrase = "very-secret-passphrase-32chars!!",
+            )
+        val frame = BandwidthUpgradeFrames.upgradePathAvailable(original)
+        val parsed = parse(frame)
+        val decoded = BandwidthUpgradeFrames.decodeCredentials(parsed.upgradePathInfo)
+        assertThat(decoded).isEqualTo(original)
+    }
+
+    @Test
+    fun `decodeCredentials returns Generic for Wi-Fi Aware with malformed service_info`() {
+        // Build an UpgradePathInfo manually with a too-short service_info
+        // so the decoder cannot extract IPv6 + port; it should fall back
+        // to Generic rather than producing garbage credentials.
+        val info =
+            com.google.location.nearby.connections.proto
+                .OfflineWireFormatsProto.BandwidthUpgradeNegotiationFrame.UpgradePathInfo
+                .newBuilder()
+                .setMedium(Medium.WIFI_AWARE.toUpgradePathMedium())
+                .setWifiAwareCredentials(
+                    com.google.location.nearby.connections.proto
+                        .OfflineWireFormatsProto.BandwidthUpgradeNegotiationFrame.UpgradePathInfo.WifiAwareCredentials
+                        .newBuilder()
+                        .setServiceId("svc")
+                        .setServiceInfo(
+                            com.google.protobuf.ByteString
+                                .copyFrom(ByteArray(8)),
+                        ).setPassword("pw")
+                        .build(),
+                ).build()
+        val decoded = BandwidthUpgradeFrames.decodeCredentials(info)
+        assertThat(decoded).isEqualTo(UpgradePathCredentials.Generic(Medium.WIFI_AWARE))
+    }
+
+    @Test
     fun `decodeCredentials returns Generic for not-yet-implemented mediums`() {
         val frame = BandwidthUpgradeFrames.upgradePathAvailable(UpgradePathCredentials.Generic(Medium.WIFI_DIRECT))
         val parsed = parse(frame)

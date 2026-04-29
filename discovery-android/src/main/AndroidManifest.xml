@@ -80,4 +80,23 @@
         android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30" />
 
+    <!--
+      Wi-Fi Aware (NAN) bandwidth-upgrade medium (#53). Compile-time
+      gating only — the umbrella :app manifest declares the runtime
+      grants the user is asked for. The hardware-feature line is
+      `required="false"` because Wi-Fi Aware coverage is patchy and
+      the app falls back to other mediums on unsupported devices.
+
+      The data-path bring-up uses ConnectivityManager.requestNetwork
+      with a WifiAwareNetworkSpecifier; this needs CHANGE_WIFI_STATE
+      so the framework can pick a Wi-Fi Aware network on our behalf.
+      Discovery requires either NEARBY_WIFI_DEVICES (API 33+) or
+      ACCESS_FINE_LOCATION; both are runtime-gated and live in :app.
+    -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+
+    <uses-feature
+        android:name="android.hardware.wifi.aware"
+        android:required="false" />
+
 </manifest>
