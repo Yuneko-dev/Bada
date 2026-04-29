@@ -244,6 +244,33 @@ public object BandwidthUpgradeFrames {
                     UpgradePathCredentials.Generic(medium)
                 }
             }
+            // Wi-Fi Aware (#53): WifiAwareCredentials carries the
+            // publisher-side service_id, the IPv6 + port packed into
+            // service_info, and the data-path passphrase. See
+            // decodeWifiAwareServiceInfo for the byte layout.
+            Medium.WIFI_AWARE -> {
+                if (info.hasWifiAwareCredentials()) {
+                    val creds = info.wifiAwareCredentials
+                    val serviceInfo = creds.serviceInfo.toByteArray()
+                    val parsed = decodeWifiAwareServiceInfo(serviceInfo)
+                    if (parsed != null) {
+                        UpgradePathCredentials.WifiAware(
+                            serviceName = creds.serviceId,
+                            ipv6Address = parsed.first,
+                            port = parsed.second,
+                            passphrase = creds.password,
+                        )
+                    } else {
+                        // Wi-Fi Aware credentials present but service_info
+                        // is missing the IPv6+port packing we expect —
+                        // fall through to Generic so the orchestrator
+                        // can fail the upgrade cleanly.
+                        UpgradePathCredentials.Generic(medium)
+                    }
+                } else {
+                    UpgradePathCredentials.Generic(medium)
+                }
+            }
             // Phase 4 sub-issues (#49–#53) plug the remaining arms in
             // here as their adapters land. Until then we report Generic
             // so the upper layers can at least see that *some* path
@@ -257,7 +284,6 @@ public object BandwidthUpgradeFrames {
             // discovery-medium path instead — see Phase 4 #52.
             Medium.WIFI_DIRECT,
             Medium.WIFI_HOTSPOT,
-            Medium.WIFI_AWARE,
             Medium.BLE_L2CAP,
             Medium.BLE,
             Medium.WEB_RTC,
@@ -300,8 +326,80 @@ public object BandwidthUpgradeFrames {
                         .build(),
                 )
             }
+            is UpgradePathCredentials.WifiAware -> {
+                // The proto's WifiAwareCredentials oneof slot only has
+                // `service_id`, `service_info` (bytes), and `password`.
+                // Quick Share packs the publisher-side IPv6 link-local
+                // address (16 bytes, network order) and the TCP port
+                // (4 bytes, big-endian) into `service_info` so the
+                // subscriber can connect after the data-path callback
+                // resolves the per-network IPv6 routing. We mirror that
+                // shape here; the matching decoder lives next to the
+                // encoder for reviewability.
+                builder.setWifiAwareCredentials(
+                    UpgradePathInfo.WifiAwareCredentials
+                        .newBuilder()
+                        .setServiceId(credentials.serviceName)
+                        .setServiceInfo(
+                            ByteString.copyFrom(
+                                encodeWifiAwareServiceInfo(credentials.ipv6Address, credentials.port),
+                            ),
+                        ).setPassword(credentials.passphrase)
+                        .build(),
+                )
+            }
         }
         return builder.build()
+    }
+
+    /**
+     * Serialize the publisher-side IPv6 + port pair into the byte layout
+     * Quick Share uses for `WifiAwareCredentials.service_info`:
+     *
+     *   bytes 0..15  — IPv6 address, network order (16 bytes)
+     *   bytes 16..19 — TCP port, big-endian unsigned 16 stored in 4 bytes
+     *                  (high two bytes always zero; matches NearDrop's
+     *                  serialization of `ushort` into a 4-byte slot).
+     *
+     * Throws `IllegalArgumentException` for an address whose length is
+     * not exactly 16 bytes or a port outside `0..65535`. The caller
+     * (the per-medium provider) is responsible for handing in valid
+     * values; this function does not silently truncate.
+     */
+    internal fun encodeWifiAwareServiceInfo(
+        ipv6Address: ByteArray,
+        port: Int,
+    ): ByteArray {
+        require(ipv6Address.size == WIFI_AWARE_IPV6_LENGTH) {
+            "Wi-Fi Aware IPv6 address must be 16 bytes, got ${ipv6Address.size}"
+        }
+        require(port in 0..0xFFFF) { "Wi-Fi Aware port must fit in 16 bits, got $port" }
+        val out = ByteArray(WIFI_AWARE_SERVICE_INFO_LENGTH)
+        System.arraycopy(ipv6Address, 0, out, 0, WIFI_AWARE_IPV6_LENGTH)
+        // Big-endian, two high bytes zero — matches the Quick Share
+        // shape so a stock receiver decodes our advertisement and our
+        // decoder accepts a stock-emitted one.
+        out[WIFI_AWARE_IPV6_LENGTH] = 0
+        out[WIFI_AWARE_IPV6_LENGTH + 1] = 0
+        out[WIFI_AWARE_PORT_HIGH_OFFSET] = ((port ushr PORT_HIGH_BYTE_SHIFT) and BYTE_MASK).toByte()
+        out[WIFI_AWARE_PORT_LOW_OFFSET] = (port and BYTE_MASK).toByte()
+        return out
+    }
+
+    /**
+     * Inverse of [encodeWifiAwareServiceInfo]. Returns `null` for any
+     * `service_info` that is not exactly 20 bytes long — the wire layout
+     * is fixed-width, so a different length almost certainly means a
+     * peer encoded it differently and we should fail the upgrade rather
+     * than guess.
+     */
+    internal fun decodeWifiAwareServiceInfo(serviceInfo: ByteArray): Pair<ByteArray, Int>? {
+        if (serviceInfo.size != WIFI_AWARE_SERVICE_INFO_LENGTH) return null
+        val ipv6 = serviceInfo.copyOfRange(0, WIFI_AWARE_IPV6_LENGTH)
+        val port =
+            ((serviceInfo[WIFI_AWARE_PORT_HIGH_OFFSET].toInt() and BYTE_MASK) shl PORT_HIGH_BYTE_SHIFT) or
+                (serviceInfo[WIFI_AWARE_PORT_LOW_OFFSET].toInt() and BYTE_MASK)
+        return ipv6 to port
     }
 
     /**
@@ -328,4 +426,26 @@ public object BandwidthUpgradeFrames {
      * `google/nearby` uses.
      */
     public const val STA_FREQUENCY_NOT_SET: Int = -1
+
+    /** Length of a Wi-Fi Aware IPv6 link-local address in bytes. */
+    private const val WIFI_AWARE_IPV6_LENGTH: Int = 16
+
+    /**
+     * Length of the byte payload Quick Share packs into
+     * `WifiAwareCredentials.service_info`: 16 bytes IPv6 + 4-byte port
+     * slot (16-bit value zero-padded to 32 bits).
+     */
+    private const val WIFI_AWARE_SERVICE_INFO_LENGTH: Int = 20
+
+    /** Bit-shift for the high byte of a 16-bit big-endian port value. */
+    private const val PORT_HIGH_BYTE_SHIFT: Int = 8
+
+    /** Mask for extracting a single byte from an Int. */
+    private const val BYTE_MASK: Int = 0xFF
+
+    /** Offset of the high port byte within the service_info layout. */
+    private const val WIFI_AWARE_PORT_HIGH_OFFSET: Int = WIFI_AWARE_IPV6_LENGTH + 2
+
+    /** Offset of the low port byte within the service_info layout. */
+    private const val WIFI_AWARE_PORT_LOW_OFFSET: Int = WIFI_AWARE_IPV6_LENGTH + 3
 }
