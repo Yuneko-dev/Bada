@@ -6,8 +6,9 @@ The workflow is separate from normal CI and runs when:
 - a tag matching `v*` is pushed, such as `v1.2.3`
 
 The workflow builds `:app:assembleRelease` and `:app:bundleRelease`, signs them
-with a keystore supplied through GitHub Actions secrets, and uploads the signed
-APK and AAB as workflow artifacts. The decoded keystore lives in
+with a keystore supplied through GitHub Actions secrets, uploads the signed APK
+and AAB as workflow artifacts, and attaches them to a matching GitHub Release
+when one exists for the tag. The decoded keystore lives in
 `$RUNNER_TEMP/release.keystore` for the Gradle step only and is removed before
 artifact upload.
 
@@ -60,6 +61,12 @@ base64 -w0 release.keystore
 ```
 
 Paste the encoded value into the `KEYSTORE_B64` repository secret.
+
+## Release Assets
+
+The workflow always uploads the signed APK/AAB to the Actions run as a workflow
+artifact. If the tag already has a matching GitHub Release, the workflow also
+attaches the same files to the Release page.
 
 ## Local Signed Build
 

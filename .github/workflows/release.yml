@@ -9,7 +9,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-release:
@@ -73,3 +73,25 @@ jobs:
           path: |
             app/build/outputs/apk/release/app-release.apk
             app/build/outputs/bundle/release/app-release.aab
+
+      - name: Attach assets to matching GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_tag="${GITHUB_REF_NAME}"
+          repo="${GITHUB_REPOSITORY}"
+
+          for attempt in $(seq 1 12); do
+            if gh release view "$release_tag" --repo "$repo" >/dev/null 2>&1; then
+              gh release upload "$release_tag" \
+                --repo "$repo" \
+                app/build/outputs/apk/release/app-release.apk \
+                app/build/outputs/bundle/release/app-release.aab \
+                --clobber
+              exit 0
+            fi
+
+            sleep 5
+          done
+
+          echo "::warning::No GitHub Release found for ${release_tag}; artifacts remain on the workflow run only."
