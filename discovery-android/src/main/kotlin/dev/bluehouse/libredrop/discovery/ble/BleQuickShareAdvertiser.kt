@@ -47,30 +47,31 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * ### Wire format
  *
- * The primary service-data payload is built as a BLE v2 GATT
+ * The primary service-data payload is built as a compact BLE v2 GATT
  * advertisement header in `:core-protocol` (pure-JVM, KAT-tested). Stock
- * senders read the actual receiver identity from slot zero on the
- * connectable GATT service before opening the same GATT socket. The slot
- * value has the raw fast-body shape that Samsung GMS logs after a
- * successful slot read:
+ * Samsung senders read the visible receiver identity from GATT slot zero,
+ * where LibreDrop publishes a second-profile fast advertisement:
  *
  * ```text
- * [ versPCP | endpoint_id(4 ASCII) | endpoint_info_len |
- *   EndpointInfo(N) ]
+ * [ header | bloom_filter | advertisement_hash | psm=0 ]
  * ```
  *
- * The compact header fits inside the legacy 31-byte scan-response budget
- * while letting the GATT slot carry a visible name-bearing [EndpointInfo].
- * This keeps the production receiver on the verified GATT socket path and
- * avoids publishing an LE CoC PSM that One UI can prefer over GATT.
+ * Vivo/OriginOS devices can run Google Play services' own Nearby GATT
+ * provider beside LibreDrop. The regular `0xFEF3` slot service therefore
+ * must stay published, and slot zero must advertise the second-profile socket
+ * so Samsung resolves the selected peer into LibreDrop instead of Google's
+ * coresident regular profile. The connectable extended payload carries the
+ * visible receiver name only. Do not append the RX instant-connection extra
+ * field here: on One UI 8.0.5 it promotes the tap into a separate
+ * Mosey/link-local path on port 8770, bypassing LibreDrop's BLE GATT
+ * bootstrap server.
  *
- * LibreDrop also submits a second legacy DCT advertisement on `0xFC73`. Stock
- * Nearby uses DCT as the compact visible identity path: it carries a short
- * name and a service-id hash without stuffing the name into the 27-byte
- * `0xFEF3` fast-advertisement value. Keeping this as a legacy advertisement
- * matters for off-LAN discovery because Samsung's GMS scan path was observed
- * to ignore LibreDrop's extended-only DCT set while still consuming legacy
- * `0xFEF3` scan-response data.
+ * LibreDrop does not submit the optional DCT (`0xFC73`) advertisement in
+ * receiver mode. Samsung ShareLive was observed to probe the DCT advertiser
+ * address as if it were a GATT advertisement header after a successful first
+ * transfer; that failed probe poisoned the next tap and routed it to GMS's
+ * regular socket. The visible extended `0xFEF3` advertisement is the stable
+ * identity surface for this path.
  *
  * ### Lifecycle
  *
@@ -127,9 +128,9 @@ import java.util.concurrent.atomic.AtomicReference
  * @param gate platform-advertiser abstraction; tests inject a fake.
  * @param permissionChecker checks `BLUETOOTH_ADVERTISE` at start time;
  *   defaults to a [ContextCompat]-backed implementation in production.
- * @param payloadFactory builds the compact GATT advertisement header from
- *   the supplied [EndpointInfo] and the latest endpoint_id. The hosted slot
- *   carries the same visible identity that the GATT server exposes.
+ * @param payloadFactory builds the compact advertisement header from the
+ *   supplied [EndpointInfo] and the latest endpoint_id. Visible identity rides
+ *   in the optional extended/DCT advertisements.
  * @param visiblePayloadFactory optionally builds an Android O+ extended
  *   `0xFEF3` payload carrying the visible [EndpointInfo]. This is the BLE-only
  *   path Samsung ShareLive was observed to promote into the share sheet when
@@ -307,15 +308,16 @@ public class BleQuickShareAdvertiser internal constructor(
             active.set(registration)
             currentEndpointInfo = endpointInfo
             currentEndpointId = endpointId
+            val dctEndpointLabel = dctPayload?.let { endpointInfo.dctEndpointId() } ?: "-"
             Log.w(
                 TAG,
                 "start: BLE pulse advertise started bytes=${payload.size} " +
                     "endpointId=${endpointId.toAsciiLabel()} payload=${payload.toHex()} " +
                     "visibleBytes=${visiblePayload?.size ?: 0} " +
-                    "dctBytes=${dctPayload?.size ?: 0} dctEndpointId=${endpointInfo.dctEndpointId() ?: "-"} " +
+                    "dctBytes=${dctPayload?.size ?: 0} dctEndpointId=$dctEndpointLabel " +
                     "uuid=${BleServiceData.SERVICE_UUID_128_STRING} " +
                     "dctUuid=${DctAdvertisement.SERVICE_UUID_128_STRING} " +
-                    "mode=${describeAdvertiseMode(currentMode)} placement=scan-response+extended-visible+dct-legacy",
+                    "mode=${describeAdvertiseMode(currentMode)} placement=direct-fast+visible-extended+dct-legacy",
             )
             true
         }
@@ -426,13 +428,14 @@ public class BleQuickShareAdvertiser internal constructor(
                 return@synchronized false
             }
             active.set(restarted)
+            val dctEndpointLabel = dctPayload?.let { info.dctEndpointId() } ?: "-"
             Log.w(
                 TAG,
                 "setAdvertiseMode: ${describeAdvertiseMode(previous)} -> ${describeAdvertiseMode(mode)} " +
                     "endpointId=${id.toAsciiLabel()} payload=${payload.toHex()} " +
                     "visibleBytes=${visiblePayload?.size ?: 0} " +
-                    "dctBytes=${dctPayload?.size ?: 0} dctEndpointId=${info.dctEndpointId() ?: "-"} " +
-                    "placement=scan-response+extended-visible+dct-legacy",
+                    "dctBytes=${dctPayload?.size ?: 0} dctEndpointId=$dctEndpointLabel " +
+                    "placement=direct-fast+visible-extended+dct-legacy",
             )
             true
         }
@@ -633,7 +636,12 @@ public object DefaultPayloadFactory : PayloadFactory {
         endpointId: ByteArray,
         endpointInfo: EndpointInfo,
     ): ByteArray {
-        val gattAdvertisement = buildSlotPayload(endpointId, endpointInfo)
+        val gattAdvertisement =
+            BleServiceData.encodeFramed(
+                endpointId = endpointId,
+                endpointInfo = endpointInfo,
+                secondProfile = true,
+            )
         return BleAdvertisementHeader.encodeSingleSlot(
             serviceId = NearbyServiceId.VALUE,
             gattAdvertisement = gattAdvertisement,
@@ -641,16 +649,6 @@ public object DefaultPayloadFactory : PayloadFactory {
             supportsExtendedAdvertisement = endpointInfo.supportsVisibleExtendedAdvertisement(),
         )
     }
-
-    internal fun buildSlotPayload(
-        endpointId: ByteArray,
-        endpointInfo: EndpointInfo,
-    ): ByteArray =
-        BleServiceData.encodeFramed(
-            endpointId = endpointId,
-            endpointInfo = endpointInfo,
-            secondProfile = true,
-        )
 }
 
 private fun EndpointInfo.supportsVisibleExtendedAdvertisement(): Boolean = !hidden && !deviceName.isNullOrBlank()
@@ -675,21 +673,14 @@ public object DefaultVisiblePayloadFactory : OptionalPayloadFactory {
         endpointInfo: EndpointInfo,
     ): ByteArray? {
         if (endpointInfo.hidden || endpointInfo.deviceName == null) return null
-        val psm = BleDctPsmHolder.currentPsm
-        return if (psm != null && psm != DctAdvertisement.DEFAULT_PSM) {
-            BleServiceData.encodeFramedWithPsm(
-                endpointId = endpointId,
-                endpointInfo = endpointInfo,
-                psm = psm,
-                secondProfile = true,
-            )
-        } else {
-            BleServiceData.encodeFramed(
-                endpointId = endpointId,
-                endpointInfo = endpointInfo,
-                secondProfile = true,
-            )
-        }
+        val activePsm = BleDctPsmHolder.currentPsm?.takeIf { it != DctAdvertisement.DEFAULT_PSM }
+        return BleServiceData.encodeFramedWithExtraFields(
+            endpointId = endpointId,
+            endpointInfo = endpointInfo,
+            psm = activePsm,
+            rxInstantConnectionAdvertisement = null,
+            secondProfile = true,
+        )
     }
 }
 
@@ -703,15 +694,7 @@ public fun interface DctPayloadFactory {
 }
 
 public object DefaultDctPayloadFactory : DctPayloadFactory {
-    override fun build(endpointInfo: EndpointInfo): ByteArray? =
-        endpointInfo.deviceName?.takeIf { it.isNotBlank() }?.let { name ->
-            DctAdvertisement.encode(
-                serviceId = NearbyServiceId.VALUE,
-                deviceName = name,
-                psm = BleDctPsmHolder.currentPsm ?: DctAdvertisement.DEFAULT_PSM,
-                dedup = DctAdvertisement.DEFAULT_DEDUP,
-            )
-        }
+    override fun build(endpointInfo: EndpointInfo): ByteArray? = null
 }
 
 private fun ByteArray.toAsciiLabel(): String = String(this, Charsets.US_ASCII)
@@ -737,19 +720,17 @@ private fun EndpointInfo.dctEndpointId(): String? =
  */
 public interface BleAdvertiserGate {
     /**
-     * Begins a Quick Share fast-advertisement under
+     * Begins a Quick Share advertisement under
      * [BleServiceData.SERVICE_UUID_128_STRING] with the given
-     * 27-byte hidden framed service-data payload and platform mode.
+     * compact framed service-data payload and platform mode.
      *
      * Returns a [Registration] handle whose [Registration.close] stops
      * the platform advertisement, or `null` if it could not be started
      * (adapter off, no LE peripheral mode, etc.).
      *
-     * @param serviceData the encoded `0xFEF3` service-data payload from
-     *   [BleServiceData.encodeFramed]. Must be ≤ 27 bytes for the
-     *   default hidden EndpointInfo shape; longer payloads (e.g. with
-     *   inline UTF-8 device name) may exceed the 31-byte advertising-PDU
-     *   budget and trigger `ADVERTISE_FAILED_DATA_TOO_LARGE`.
+     * @param serviceData the encoded `0xFEF3` service-data payload. The
+     *   production receiver uses [BleServiceData.encodeFramed] while tests
+     *   may inject custom bytes for failure-path coverage.
      * @param dctServiceData optional `0xFC73` DCT service-data payload used
      *   as the stock off-LAN visible-name hint.
      * @param mode one of [AdvertiseSettings.ADVERTISE_MODE_LOW_POWER],

@@ -10,7 +10,6 @@ import com.google.common.truth.Truth.assertThat
 import dev.bluehouse.libredrop.protocol.endpoint.BleAdvertisement
 import dev.bluehouse.libredrop.protocol.endpoint.BleAdvertisementHeader
 import dev.bluehouse.libredrop.protocol.endpoint.BleServiceData
-import dev.bluehouse.libredrop.protocol.endpoint.DctAdvertisement
 import dev.bluehouse.libredrop.protocol.endpoint.DeviceType
 import dev.bluehouse.libredrop.protocol.endpoint.EndpointInfo
 import org.junit.jupiter.api.Test
@@ -71,7 +70,7 @@ class BleQuickShareAdvertiserTest {
     }
 
     @Test
-    fun `start submits a GATT advertisement header payload`() {
+    fun `start submits a GATT advertisement header`() {
         val gate = RecordingGate(failOnStart = false)
         val advertiser =
             BleQuickShareAdvertiser.forTesting(
@@ -95,20 +94,10 @@ class BleQuickShareAdvertiserTest {
         assertThat(header!!.numSlots).isEqualTo(1)
         assertThat(header.psm).isEqualTo(0)
         assertThat(header.supportsExtendedAdvertisement).isFalse()
-        assertThat(BleServiceData.parse(payload)).isNull()
-
-        val slotPayload = DefaultPayloadFactory.buildSlotPayload(endpointId("DROP"), info)
-        val slotAdvertisement = BleAdvertisement.parse(slotPayload)
-        assertThat(slotAdvertisement).isNotNull()
-        assertThat(slotAdvertisement!!.secondProfile).isTrue()
-        val slot = BleServiceData.parse(slotPayload)
-        assertThat(slot).isNotNull()
-        assertThat(String(slot!!.endpointId, Charsets.US_ASCII)).isEqualTo("DROP")
-        assertThat(slot.endpointInfo).isEqualTo(info)
     }
 
     @Test
-    fun `start exposes visible EndpointInfo through GATT header and extended payload`() {
+    fun `start exposes visible EndpointInfo without RX instant extra field`() {
         val gate = RecordingGate(failOnStart = false)
         val advertiser =
             BleQuickShareAdvertiser.forTesting(
@@ -132,30 +121,27 @@ class BleQuickShareAdvertiserTest {
         val payload = call.payload
         val dctPayload = call.dctPayload
         val visiblePayload = call.visiblePayload
-        val header = BleAdvertisementHeader.parse(payload)
-        assertThat(header).isNotNull()
-        assertThat(header!!.numSlots).isEqualTo(1)
-        assertThat(header.psm).isEqualTo(0)
-        assertThat(header.supportsExtendedAdvertisement).isTrue()
-        assertThat(BleServiceData.parse(payload)).isNull()
+        val primaryHeader = BleAdvertisementHeader.parse(payload)
+        assertThat(primaryHeader).isNotNull()
+        assertThat(primaryHeader!!.numSlots).isEqualTo(1)
+        assertThat(primaryHeader.psm).isEqualTo(0)
+        assertThat(primaryHeader.supportsExtendedAdvertisement).isTrue()
 
-        assertThat(dctPayload).isNotNull()
-        val dct = DctAdvertisement.parse(dctPayload!!)!!
-        assertThat(dct.deviceName).isEqualTo("LibreDr")
-        assertThat(dct.isDeviceNameTruncated).isTrue()
-        assertThat(dct.psm).isEqualTo(DctAdvertisement.DEFAULT_PSM)
+        assertThat(dctPayload).isNull()
 
         assertThat(visiblePayload).isNotNull()
-        assertThat(BleAdvertisement.parse(visiblePayload!!)!!.secondProfile).isTrue()
+        val visibleAdvertisement = BleAdvertisement.parse(visiblePayload!!)!!
+        assertThat(visibleAdvertisement.secondProfile).isTrue()
         val visibleInfo = BleServiceData.parse(visiblePayload)!!.endpointInfo
         assertThat(visibleInfo.hidden).isFalse()
         assertThat(visibleInfo.deviceName).isEqualTo("LibreDrop")
         assertThat(BleServiceData.parsePsmExtraField(visiblePayload)).isNull()
+        assertThat(visibleAdvertisement.rxInstantConnectionAdvertisement).isEmpty()
         assertThat(visiblePayload.size).isGreaterThan(27)
     }
 
     @Test
-    fun `DCT and visible fast payloads carry active L2CAP PSM when available`() {
+    fun `visible fast payload carries active L2CAP PSM when available`() {
         BleDctPsmHolder.set(0x1234)
         try {
             val gate = RecordingGate(failOnStart = false)
@@ -169,14 +155,16 @@ class BleQuickShareAdvertiserTest {
 
             assertThat(started).isTrue()
             val call = gate.startCalls.single()
-            val header = BleAdvertisementHeader.parse(call.payload)
-            assertThat(header).isNotNull()
-            assertThat(header!!.psm).isEqualTo(0)
-            assertThat(header.numSlots).isEqualTo(1)
-            assertThat(header.supportsExtendedAdvertisement).isTrue()
-            val dct = DctAdvertisement.parse(call.dctPayload!!)!!
-            assertThat(dct.psm).isEqualTo(0x1234)
+            val primaryHeader = BleAdvertisementHeader.parse(call.payload)
+            assertThat(primaryHeader).isNotNull()
+            assertThat(primaryHeader!!.numSlots).isEqualTo(1)
+            assertThat(primaryHeader.psm).isEqualTo(0)
+            assertThat(primaryHeader.supportsExtendedAdvertisement).isTrue()
+            assertThat(call.dctPayload).isNull()
             assertThat(BleServiceData.parsePsmExtraField(call.visiblePayload!!)).isEqualTo(0x1234)
+            val visibleAdvertisement = BleAdvertisement.parse(call.visiblePayload!!)!!
+            assertThat(visibleAdvertisement.psm).isEqualTo(0x1234)
+            assertThat(visibleAdvertisement.rxInstantConnectionAdvertisement).isEmpty()
         } finally {
             BleDctPsmHolder.clear()
         }
@@ -213,10 +201,12 @@ class BleQuickShareAdvertiserTest {
         assertThat(gate.firstRegistration?.closed).isTrue()
         assertThat(gate.lastRegistration?.closed).isFalse()
 
-        // Header bytes include a random dummy service id; identity drift is
-        // covered by the replacement count and by the GATT-slot encoder tests.
+        // The primary bytes are compact GATT headers; identity drift is covered by
+        // the replacement count and payload parser assertions above.
         val (payload, _) = gate.startCalls.last()
-        assertThat(BleAdvertisementHeader.parse(payload)).isNotNull()
+        val header = BleAdvertisementHeader.parse(payload)
+        assertThat(header).isNotNull()
+        assertThat(header!!.numSlots).isEqualTo(1)
     }
 
     @Test

@@ -364,7 +364,7 @@ class ReceiverSessionTest {
         }
 
     @Test
-    fun `gated publish rolls back initial control servers when mDNS advertise fails`() =
+    fun `gated publish keeps initial control active when mDNS advertise fails`() =
         runBlocking {
             val initialControlServer = RecordingInitialControlServer()
             val session =
@@ -384,10 +384,16 @@ class ReceiverSessionTest {
 
             assertThrows<IllegalStateException> { session.publishAdvertisement() }
             assertThat(session.isAdvertising).isFalse()
-            assertThat(initialControlServer.stopCount).isEqualTo(1)
-            assertThat(initialControlServer.isActive).isFalse()
+            assertThat(initialControlServer.stopCount).isEqualTo(0)
+            assertThat(initialControlServer.startCalls).hasSize(1)
+            assertThat(initialControlServer.isActive).isTrue()
+
+            assertThrows<IllegalStateException> { session.publishAdvertisement() }
+            assertThat(initialControlServer.stopCount).isEqualTo(0)
+            assertThat(initialControlServer.startCalls).hasSize(1)
 
             session.stop()
+            assertThat(initialControlServer.stopCount).isEqualTo(1)
         }
 
     @Test
@@ -485,6 +491,42 @@ class ReceiverSessionTest {
             assertThat(advertiser.attempts[2].endpointInfo).isEqualTo(original)
             assertThat(advertiser.attempts[2].port).isEqualTo(originalPort)
             assertThat(advertiser.attempts[2].succeeded).isTrue()
+
+            session.stop()
+        }
+
+    @Test
+    fun `replaceEndpointInfo can keep initial control active when mDNS republish fails`() =
+        runBlocking {
+            val advertiser = FailingOnAttemptAdvertiser(failOnAttempt = 2)
+            val initialControlServer = RecordingInitialControlServer()
+            val original = sampleEndpointInfo(name = "Old Name")
+            val updated = sampleEndpointInfo(name = "New Name")
+            val session =
+                makeSession(
+                    advertiser = advertiser,
+                    endpointInfo = original,
+                    advertiseGated = true,
+                    initialControlServers = listOf(initialControlServer),
+                )
+
+            session.start()
+            session.publishAdvertisement()
+
+            val replaced =
+                session.replaceEndpointInfo(
+                    endpointInfo = updated,
+                    requireAdvertisement = false,
+                )
+
+            assertThat(replaced).isTrue()
+            assertThat(session.isAdvertising).isFalse()
+            assertThat(initialControlServer.isActive).isTrue()
+            assertThat(initialControlServer.stopCount).isEqualTo(1)
+            assertThat(initialControlServer.startCalls).hasSize(2)
+            assertThat(initialControlServer.startCalls[1].endpointInfo).isEqualTo(updated)
+            assertThat(advertiser.attempts).hasSize(2)
+            assertThat(advertiser.attempts[1].succeeded).isFalse()
 
             session.stop()
         }
