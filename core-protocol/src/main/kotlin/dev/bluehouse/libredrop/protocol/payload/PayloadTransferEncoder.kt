@@ -11,6 +11,7 @@ import com.google.location.nearby.connections.proto.OfflineWireFormatsProto.Payl
 import com.google.location.nearby.connections.proto.OfflineWireFormatsProto.PayloadTransferFrame.PayloadHeader
 import com.google.location.nearby.connections.proto.OfflineWireFormatsProto.V1Frame
 import com.google.protobuf.ByteString
+import dev.bluehouse.libredrop.protocol.transport.FramedConnection
 import java.nio.ByteBuffer
 import java.nio.channels.ReadableByteChannel
 
@@ -42,6 +43,19 @@ public object PayloadTransferEncoder {
      * eat into the TCP send buffer and stall progress reporting.
      */
     public const val DEFAULT_FILE_CHUNK_SIZE: Int = 512 * 1024
+
+    private const val ADAPTIVE_FILE_CHUNK_SIZE_256_KIB: Int = 256 * 1024
+    private const val ADAPTIVE_FILE_CHUNK_SIZE_1_MIB: Int = 1024 * 1024
+    private const val ADAPTIVE_FILE_CHUNK_SIZE_2_MIB: Int = 2 * 1024 * 1024
+    private const val ADAPTIVE_FILE_TIER_1_MAX_SIZE: Long = 1024L * 1024L
+    private const val ADAPTIVE_FILE_TIER_2_MAX_SIZE: Long = 8L * 1024L * 1024L
+    private const val ADAPTIVE_FILE_TIER_3_MAX_SIZE: Long = 64L * 1024L * 1024L
+
+    init {
+        check(ADAPTIVE_FILE_CHUNK_SIZE_2_MIB < FramedConnection.SANE_FRAME_LENGTH) {
+            "Adaptive file chunk size cap must stay below FramedConnection.SANE_FRAME_LENGTH"
+        }
+    }
 
     /**
      * Encode an outbound BYTES payload.
@@ -225,6 +239,25 @@ public object PayloadTransferEncoder {
                         .build(),
                 ),
             )
+        }
+    }
+
+    /**
+     * Deterministic sender-side policy for outbound FILE payload chunking.
+     *
+     * The sender always stays comfortably below
+     * [FramedConnection.SANE_FRAME_LENGTH] by capping chunks at 2 MiB,
+     * which still leaves roughly 3 MiB of headroom for protobuf and
+     * SecureMessage envelope overhead inside the framed transport.
+     */
+    internal fun selectFileChunkSize(totalSize: Long): Int {
+        require(totalSize >= 0) { "totalSize must be non-negative, got $totalSize" }
+
+        return when {
+            totalSize <= ADAPTIVE_FILE_TIER_1_MAX_SIZE -> ADAPTIVE_FILE_CHUNK_SIZE_256_KIB
+            totalSize <= ADAPTIVE_FILE_TIER_2_MAX_SIZE -> DEFAULT_FILE_CHUNK_SIZE
+            totalSize <= ADAPTIVE_FILE_TIER_3_MAX_SIZE -> ADAPTIVE_FILE_CHUNK_SIZE_1_MIB
+            else -> ADAPTIVE_FILE_CHUNK_SIZE_2_MIB
         }
     }
 

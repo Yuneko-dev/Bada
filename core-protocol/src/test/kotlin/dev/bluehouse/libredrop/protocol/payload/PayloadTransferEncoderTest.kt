@@ -10,6 +10,7 @@ import com.google.location.nearby.connections.proto.OfflineWireFormatsProto.Offl
 import com.google.location.nearby.connections.proto.OfflineWireFormatsProto.PayloadTransferFrame
 import com.google.location.nearby.connections.proto.OfflineWireFormatsProto.PayloadTransferFrame.PayloadHeader
 import com.google.location.nearby.connections.proto.OfflineWireFormatsProto.V1Frame
+import dev.bluehouse.libredrop.protocol.transport.FramedConnection
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import java.io.ByteArrayInputStream
@@ -25,6 +26,27 @@ import kotlin.random.Random
  * [PayloadAssemblerTest].
  */
 class PayloadTransferEncoderTest {
+    @Test
+    fun `selectFileChunkSize uses deterministic size tiers below the framed transport cap`() {
+        assertThat(PayloadTransferEncoder.selectFileChunkSize(0)).isEqualTo(256 * 1024)
+        assertThat(PayloadTransferEncoder.selectFileChunkSize(1024L * 1024L)).isEqualTo(256 * 1024)
+        assertThat(PayloadTransferEncoder.selectFileChunkSize((1024L * 1024L) + 1L)).isEqualTo(512 * 1024)
+        assertThat(PayloadTransferEncoder.selectFileChunkSize(8L * 1024L * 1024L)).isEqualTo(512 * 1024)
+        assertThat(PayloadTransferEncoder.selectFileChunkSize((8L * 1024L * 1024L) + 1L)).isEqualTo(1024 * 1024)
+        assertThat(PayloadTransferEncoder.selectFileChunkSize(64L * 1024L * 1024L)).isEqualTo(1024 * 1024)
+
+        val largestTier = PayloadTransferEncoder.selectFileChunkSize(Long.MAX_VALUE)
+        assertThat(largestTier).isEqualTo(2 * 1024 * 1024)
+        assertThat(largestTier).isLessThan(FramedConnection.SANE_FRAME_LENGTH)
+    }
+
+    @Test
+    fun `selectFileChunkSize rejects negative total size`() {
+        assertThrows<IllegalArgumentException> {
+            PayloadTransferEncoder.selectFileChunkSize(-1)
+        }
+    }
+
     @Test
     fun `encodeBytesPayload emits exactly two frames in the Android quirk shape`() {
         val data = "abcde".toByteArray()

@@ -1225,9 +1225,9 @@ internal class OutboundConnectionDriver(
     }
 
     /**
-     * Stream a single [file] in 512 KiB chunks. Returns a non-null
-     * terminal result if the user cancelled mid-file; null on
-     * successful completion of this single file.
+     * Stream a single [file] in deterministic, size-based chunks.
+     * Returns a non-null terminal result if the user cancelled mid-file;
+     * null on successful completion of this single file.
      */
     private suspend fun streamOneFile(
         channel: SecureChannel,
@@ -1235,14 +1235,19 @@ internal class OutboundConnectionDriver(
     ): OutboundResult? {
         val source = file.openChannel()
         var chunkIdx = 0
+        val chunkSize = PayloadTransferEncoder.selectFileChunkSize(file.size)
         try {
+            logger(
+                "fsm: streamOneFile chunkSize=$chunkSize " +
+                    "name=${file.name} size=${file.size} payloadId=${file.payloadId}",
+            )
             val frames =
                 PayloadTransferEncoder.encodeFilePayload(
                     payloadId = file.payloadId,
                     fileName = file.name,
                     totalSize = file.size,
                     source = source,
-                    chunkSize = PayloadTransferEncoder.DEFAULT_FILE_CHUNK_SIZE,
+                    chunkSize = chunkSize,
                     lastModifiedTimestampMillis = file.lastModifiedTimestampMillis,
                     // `parent_folder` is also carried on every PayloadHeader,
                     // not just on FileMetadata. Quick Share receivers can
