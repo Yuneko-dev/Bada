@@ -561,11 +561,12 @@ internal class OutboundConnectionDriver(
                 // request, so the peer has no reason to ack and the drain
                 // would just block for the full timeout window.
                 if (shouldDrainForSafeDisconnect(result)) {
-                    withTimeoutOrNull(SAFE_DISCONNECT_ACK_TIMEOUT_MS) {
+                    val timeoutMillis = safeDisconnectAckTimeoutMillis()
+                    withTimeoutOrNull(timeoutMillis) {
                         drainSafeDisconnectAck(wireChannel)
                     } ?: logger(
                         "fsm: safe-disconnect drain timed out after " +
-                            "${SAFE_DISCONNECT_ACK_TIMEOUT_MS}ms",
+                            "${timeoutMillis}ms",
                     )
                 }
                 publishCompletedIfNeeded(result)
@@ -927,8 +928,9 @@ internal class OutboundConnectionDriver(
     }
 
     private suspend fun drainSafeDisconnectAckDirect(channel: SecureChannel) {
+        val timeoutMillis = safeDisconnectAckTimeoutMillis()
         val acked =
-            withTimeoutOrNull(SAFE_DISCONNECT_ACK_TIMEOUT_MS) {
+            withTimeoutOrNull(timeoutMillis) {
                 while (true) {
                     if (channel.hasBufferedInput()) {
                         val frame = channel.receiveOfflineFrame()
@@ -947,9 +949,19 @@ internal class OutboundConnectionDriver(
         if (!acked) {
             logger(
                 "fsm: safe-disconnect drain timed out after " +
-                    "${SAFE_DISCONNECT_ACK_TIMEOUT_MS}ms",
+                    "${timeoutMillis}ms",
             )
         }
+    }
+
+    private fun safeDisconnectAckTimeoutMillis(): Long {
+        if (totalSize <= 0L) return SAFE_DISCONNECT_ACK_TIMEOUT_MIN_MS
+        val chunkSize = PayloadTransferEncoder.DEFAULT_FILE_CHUNK_SIZE.toLong()
+        val chunkCount = ((totalSize + chunkSize - 1L) / chunkSize).coerceAtLeast(1L)
+        val sizeScaled = chunkCount * SAFE_DISCONNECT_ACK_TIMEOUT_PER_CHUNK_MS
+        return sizeScaled
+            .coerceAtLeast(SAFE_DISCONNECT_ACK_TIMEOUT_MIN_MS)
+            .coerceAtMost(SAFE_DISCONNECT_ACK_TIMEOUT_MAX_MS)
     }
 
     /**
@@ -1610,16 +1622,18 @@ internal class OutboundConnectionDriver(
         private const val BLE_WIFI_DIRECT_POLL_DELAY_MILLIS: Long = 25L
 
         /**
-         * Maximum time the orchestrator waits for the peer's
+         * Minimum time the orchestrator waits for the peer's
          * `DisconnectionFrame{ack_safe_to_disconnect=true}` (or peer
          * FIN) after sending its own request. 1500 ms covers Samsung
          * One UI 8.0.5's observed drain time for small payloads, plus
          * headroom for stock Quick Share builds that do not send an ack
          * before their receive UI leaves "Preparing..."; larger payloads
-         * dominate over this timeout because the receiver only acks after
-         * writing all pending payloads to disk.
+         * scale this window by FILE chunk count because the receiver only
+         * acks after writing all pending payloads to disk.
          */
-        const val SAFE_DISCONNECT_ACK_TIMEOUT_MS: Long = 5_000L
+        private const val SAFE_DISCONNECT_ACK_TIMEOUT_MIN_MS: Long = 5_000L
+        private const val SAFE_DISCONNECT_ACK_TIMEOUT_PER_CHUNK_MS: Long = 1_000L
+        private const val SAFE_DISCONNECT_ACK_TIMEOUT_MAX_MS: Long = 60_000L
     }
 
     private sealed interface BandwidthNegotiation {

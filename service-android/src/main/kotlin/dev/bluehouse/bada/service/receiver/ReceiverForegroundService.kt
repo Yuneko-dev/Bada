@@ -27,6 +27,7 @@ import dev.bluehouse.bada.discovery.Discovery
 import dev.bluehouse.bada.discovery.ble.BleQuickShareAdvertiser
 import dev.bluehouse.bada.discovery.ble.BleQuickShareScanner
 import dev.bluehouse.bada.discovery.bootstrap.BleGattInitialControlServer
+import dev.bluehouse.bada.discovery.bootstrap.BleL2capInitialControlServer
 import dev.bluehouse.bada.discovery.diagnostics.DiagnosticLog
 import dev.bluehouse.bada.discovery.medium.MediumRegistries
 import dev.bluehouse.bada.protocol.endpoint.BleServiceData
@@ -1017,10 +1018,12 @@ public class ReceiverForegroundService : Service() {
                     mediumRegistry = MediumRegistries.defaultForContext(context.applicationContext),
                     initialControlServers =
                         listOf(
-                            // Keep the production receiver bootstrap GATT-only for now.
-                            // Advertising an LE CoC PSM makes One UI prefer L2CAP over
-                            // the verified GATT socket path and fail before protocol
-                            // consent reaches the app.
+                            // Prefer LE CoC when the local controller exposes a PSM:
+                            // it keeps stock senders off the device-wide GATT table,
+                            // which may also contain Google Nearby services on
+                            // GMS-capable Vivo / OriginOS builds. GATT remains
+                            // published as a fallback for peers without L2CAP support.
+                            BleL2capInitialControlServer(context.applicationContext),
                             BleGattInitialControlServer(
                                 context = context.applicationContext,
                                 endpointIdProvider = { BleEndpointIdHolder.bytesFor() },

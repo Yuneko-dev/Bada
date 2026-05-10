@@ -117,9 +117,28 @@ Manual on-device interop is documented as Markdown checklists under `docs/testin
 - `docs/testing/interop-neardrop-macos.md` — reference implementation on Mac.
 - `docs/testing/interop-stock-quick-share-android.md` — Pixel + Samsung coverage.
 
+### Pre-merge debug-loop regression
+
+As the final test step before merging any PR that changes discovery, advertised device names, BLE initial-control, mDNS gating, Wi-Fi Direct upgrade, safe-disconnect, or payload transfer behavior, run the real-device debug loop against one vanilla GMS Android device and one non-GMS Android device. Do not merge until every scenario below passes 5 consecutive times in both directions.
+
+Matrix factors:
+- Topology: same Wi-Fi, and different/no shared Wi-Fi. If two distinct APs cannot be controlled reliably through ADB, use a no-shared-LAN setup such as GMS device Wi-Fi off with mobile data on while the non-GMS device stays on Wi-Fi.
+- File size: small file and large file.
+- File count: single file and multiple files.
+- Bada receiver name: default Android device name and customized advertised Bada device name.
+- Direction: Bada/non-GMS to GMS Quick Share, and GMS Quick Share to Bada/non-GMS.
+
+Acceptance criteria:
+- Every matrix cell completes 5 consecutive successful transfers with no retries hidden between attempts.
+- The receiver stores the expected number of files, with exact byte sizes for each payload and no stale files counted from earlier attempts.
+- The customized Bada name is visible and selectable from the GMS sender before GMS-to-Bada transfers.
+- Both same-Wi-Fi LAN paths and no-shared-LAN BLE/Wi-Fi Direct paths are exercised.
+- On failure, capture the relevant logcat tags from the On-device debugging section and, for vivo/Funtouch devices, also pull `getExternalFilesDir(null)/libredrop-outbound.log` before changing code.
+
 ## Conventions
 
 - **Branch names**: `<type>/<short-description>` where type is `feature`, `bugfix`, `hotfix`, `refactor`, `docs`, `test`, or `chore`. Issue-scoped branches include the issue number, e.g. `bugfix/issue-83-discovery-real-devices`.
 - **Commit / PR messages**: English only. No AI attribution lines (no `Co-Authored-By: Claude`, no `Generated with` blurbs). Use the `feat:` / `fix:` / `chore:` / `refactor:` / `docs:` / `test:` prefix that matches the change.
+- **Release process**: when preparing a release, make the Git release tag version match the app version defined in Gradle. In this repo, the source of truth is `app/build.gradle.kts` `defaultConfig.versionName`; if you bump the release tag to `vX.Y.Z`, update `versionName` to the same `X.Y.Z` variant string in the same change and verify they stay aligned.
 - **Merge strategy**: squash-merge (`gh pr merge <N> --squash --delete-branch`) is the default. The `--delete-branch` flag will fail to delete the local branch if a worktree is using it; clean up the worktree afterwards with `git worktree remove --force <path>`, then `git branch -D <branch>`.
 - **Worktrees**: parallel work uses sibling worktrees at `../wt-epic-<E>-issue-<N>` or `../wt-issue-<N>`. Always copy `local.properties` from the primary tree (it's gitignored): `cp /Users/kyujin/Projects/LibreDrop/local.properties .` — Android builds need it for `sdk.dir`.

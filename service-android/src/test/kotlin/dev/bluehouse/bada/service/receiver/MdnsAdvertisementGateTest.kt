@@ -14,6 +14,8 @@ import dev.bluehouse.bada.protocol.medium.MediumRegistry
 import dev.bluehouse.bada.protocol.payload.FileDestinationFactory
 import dev.bluehouse.bada.protocol.payload.TempFileDestinationFactory
 import dev.bluehouse.bada.protocol.server.TcpReceiverServer
+import dev.bluehouse.bada.protocol.transport.ConnectedTransport
+import dev.bluehouse.bada.protocol.transport.InitialControlServer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -558,6 +560,75 @@ class MdnsAdvertisementGateTest {
             session.stop()
         }
 
+    @Test
+    fun `initial control starts before BLE broadcaster and mDNS publish`() =
+        runTest {
+            val order = mutableListOf<String>()
+            val initialControl =
+                object : InitialControlServer {
+                    private var active = false
+
+                    override val isActive: Boolean
+                        get() = active
+
+                    override fun start(
+                        endpointInfo: EndpointInfo,
+                        acceptTransport: (ConnectedTransport) -> Unit,
+                    ): Boolean {
+                        order += "initial-control"
+                        active = true
+                        return true
+                    }
+
+                    override fun stop() {
+                        active = false
+                    }
+                }
+            val advertiser =
+                object : DiscoveryAdvertiser {
+                    override fun advertise(
+                        endpointInfo: EndpointInfo,
+                        port: Int,
+                    ): AdvertiseHandle {
+                        order += "mdns"
+                        return FakeAdvertiseHandle(port = port)
+                    }
+                }
+            val broadcaster =
+                object : BleVisibilityBroadcaster {
+                    override fun start(): Boolean {
+                        order += "ble"
+                        return true
+                    }
+
+                    override fun stop() = Unit
+                }
+            val session =
+                startedGatedSession(
+                    advertiser = advertiser,
+                    initialControlServers = listOf(initialControl),
+                )
+            val ble = MutableStateFlow<ScanActivity>(ScanActivity.Active(lastSeenAtMillis = 1_000L))
+            val override = MutableStateFlow(false)
+            val qr = MutableStateFlow(false)
+
+            val gate =
+                MdnsAdvertisementGate(
+                    session = session,
+                    bleActivity = ble,
+                    alwaysVisibleOverride = override,
+                    qrSessionActive = qr,
+                    bleBroadcaster = broadcaster,
+                )
+            gate.start(this)
+            advanceUntilIdle()
+
+            assertThat(order.take(3)).containsExactly("initial-control", "ble", "mdns").inOrder()
+
+            gate.stop()
+            session.stop()
+        }
+
     // --------------------------------------------------------------
     // Helpers
     // --------------------------------------------------------------
@@ -567,7 +638,10 @@ class MdnsAdvertisementGateTest {
      * start it (so the TCP listener binds), and return it ready for the
      * gate to drive publish/unpublish against.
      */
-    private fun startedGatedSession(advertiser: DiscoveryAdvertiser): ReceiverSession {
+    private fun startedGatedSession(
+        advertiser: DiscoveryAdvertiser,
+        initialControlServers: List<InitialControlServer> = emptyList(),
+    ): ReceiverSession {
         val session =
             ReceiverSession(
                 tcpServerFactory =
@@ -589,6 +663,7 @@ class MdnsAdvertisementGateTest {
                 advertiser = advertiser,
                 factoryProvider = { TempFileDestinationFactory() },
                 endpointInfo = sampleEndpointInfo(),
+                initialControlServers = initialControlServers,
                 advertiseGated = true,
             )
         runBlocking { session.start() }

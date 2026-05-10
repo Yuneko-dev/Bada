@@ -294,6 +294,21 @@ public class ReceiverSession(
         get() = advertiseHandle?.isActive == true
 
     /**
+     * Start non-LAN initial-control listeners ahead of the BLE pulse. Some
+     * receiver advertisements carry listener metadata (for example an LE CoC
+     * PSM), so the listeners need to exist before the BLE broadcaster encodes
+     * its service data.
+     */
+    internal fun prepareInitialControlServers() {
+        synchronized(advertiseLock) {
+            check(started.get()) { "ReceiverSession has not been started" }
+            check(!stopped.get()) { "ReceiverSession has been stopped" }
+            val tcpServer = server ?: error("TCP server is not bound")
+            startInitialControlServersLocked(tcpServer)
+        }
+    }
+
+    /**
      * Publish the mDNS advertisement against the bound TCP port. Only
      * meaningful when the session was constructed with
      * `advertiseGated = true`. Idempotent: if an advertisement is

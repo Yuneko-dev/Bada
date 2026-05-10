@@ -236,9 +236,17 @@ public class MdnsAdvertisementGate(
             // "should publish" half of the gate.
             debounceJob?.cancel()
             debounceJob = null
+            // Bring up initial-control listeners before the BLE pulse so
+            // the advertised service data can include dynamic listener
+            // metadata such as an LE CoC PSM.
+            try {
+                session.prepareInitialControlServers()
+            } catch (t: Throwable) {
+                DiagnosticLog.w(TAG, "publish: failed to prepare initial control (decision=$decision)", t)
+            }
             // Bring up BLE before the potentially slow mDNS path. Some
             // vivo builds stall inside NsdManager registration; the
-            // receiver still needs to be BLE GATT connectible while that
+            // receiver still needs to be BLE connectible while that
             // platform callback is pending.
             startBleSafely(decision)
             if (!session.isAdvertising) {
