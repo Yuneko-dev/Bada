@@ -13,17 +13,19 @@ interop are out of scope.
 
 ## What It Does
 
-- Receives files from nearby Quick Share senders and saves them to Downloads,
-  or to a folder you choose in the app.
-- Sends files from Android's system share sheet to nearby Quick Share peers.
+- Receives files from nearby stock Quick Share senders over same-LAN shared
+  Wi-Fi and Wi-Fi Direct paths, then saves them to Downloads or to a folder you
+  choose in the app.
+- Sends files from Android's system share sheet to stock Quick Share peers over
+  same-LAN shared Wi-Fi and Wi-Fi Direct paths.
 - Sends folders from the app's **Send folder** button while preserving the
   folder layout on the receiver.
 - Shows the same 4-digit confirmation PIN flow users expect from Quick Share.
 - Lets you choose the advertised Quick Share device name shown to senders.
 
-Bada is still an early project. Phase 1 Wi-Fi LAN parity with NearDrop is
-complete, and current builds include BLE-assisted discovery/bootstrap work for
-stock Android peers.
+Bada is still an early project. Current builds support both same-LAN shared Wi-Fi mode and
+Wi-Fi Direct mode when sending files to or receiving files from stock Android
+Quick Share devices.
 
 ## Install
 
@@ -86,14 +88,18 @@ To send a whole folder, open Bada and tap **Send folder**.
 
 | Peer | Current expectation |
 | --- | --- |
-| Stock Android Quick Share on Pixel / GMS devices | Shared Wi-Fi LAN is the baseline path. BLE-assisted discovery/bootstrap is covered by the stock Android runbook. |
-| Stock Samsung Quick Share / One UI | Shared Wi-Fi LAN is the baseline path. Recent testing also validated BLE GATT bootstrap into a Galaxy S26 Ultra and Z Fold 7; read the Samsung note below before interpreting noisy GATT logs. |
+| Stock Android Quick Share on Pixel / GMS devices | Supported for both sending and receiving in same-LAN shared Wi-Fi mode and Wi-Fi Direct mode, where the devices do not need to be on the same Wi-Fi network. BLE-assisted discovery/bootstrap is covered by the stock Android runbook. |
+| Stock Samsung Quick Share / One UI | Supported for both sending and receiving in same-LAN shared Wi-Fi mode and Wi-Fi Direct mode, where the devices do not need to be on the same Wi-Fi network. Recent testing also validated BLE GATT bootstrap into a Galaxy S26 Ultra and Z Fold 7; read the Samsung note below before interpreting noisy GATT logs. |
 | NearDrop on macOS | Not tested |
 | Quick Share on Windows | Not tested |
 
 Networking notes:
 
-- Shared Wi-Fi means the same SSID/VLAN with mDNS multicast allowed.
+- Same-LAN shared Wi-Fi mode means the same SSID/VLAN with mDNS multicast
+  allowed.
+- Wi-Fi Direct mode covers the off-LAN Quick Share path: both devices do not
+  have to be connected to the same Wi-Fi network, because they use nearby
+  discovery/bootstrap and then transfer over a direct Wi-Fi link.
 - Guest Wi-Fi, client isolation, routed VLANs, or enterprise multicast
   filtering can make peers disappear.
 - Bluetooth Classic/RFCOMM is intentionally not exposed in user-facing flows.
