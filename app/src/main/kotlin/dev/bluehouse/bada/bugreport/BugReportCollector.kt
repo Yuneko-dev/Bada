@@ -78,6 +78,7 @@ internal class BugReportCollector(
             }
 
             val outboundLogBytes = readOptionalExternalFile("bada-outbound.log", failures, "outbound_log")
+            val diagnosticsLogBytes = collectDiagnosticsLog(includeWifiBssid, failures)
             val ringbufferText =
                 DiagnosticLog.dumpRecent(
                     maxAgeMillis = DiagnosticLog.DEFAULT_MAX_AGE_MILLIS,
@@ -125,6 +126,11 @@ internal class BugReportCollector(
                         outboundLogBytes ?: "not_available\n".encodeToByteArray(),
                     ),
                     BugReportArchiveEntry(
+                        "logs/diagnostics.log",
+                        diagnosticsLogBytes
+                            ?: "${failures["diagnostics_log"] ?: "not_available"}\n".encodeToByteArray(),
+                    ),
+                    BugReportArchiveEntry(
                         "logs/ringbuffer.txt",
                         ringbufferText.ifBlank { "not_available\n" }.encodeToByteArray(),
                     ),
@@ -163,6 +169,7 @@ internal class BugReportCollector(
         - permissions.txt: granted/denied runtime permissions
         - discovery.txt: receiver/discovery runtime state
         - logs/outbound.log: on-disk outbound diagnostic log when available
+        - logs/diagnostics.log: persisted BLE/discovery diagnostics (rotated), incl. L2CAP/GATT bootstrap detail; only when more-identifying details consent is given
         - logs/ringbuffer.txt: recent in-memory diagnostics from the last 15 minutes
         - screenshot.png: screenshot of the current Bada activity, or a placeholder when redacted
         
@@ -396,6 +403,60 @@ internal class BugReportCollector(
             return null
         }
         return runCatching { file.readBytes() }.getOrElse { t ->
+            failures[failureKey] = "not_available: could not read $fileName (${t.message})"
+            null
+        }
+    }
+
+    /**
+     * `bada-diagnostics.log` carries BLE/discovery detail that includes
+     * nearby-device identifiers (peer BLE MACs, advertisement payloads), so it
+     * ships only when the user opts in via the same more-identifying-details
+     * consent that gates the Wi-Fi BSSID (#201).
+     */
+    private fun collectDiagnosticsLog(
+        includeWifiBssid: Boolean,
+        failures: MutableMap<String, String>,
+    ): ByteArray? {
+        if (!includeWifiBssid) {
+            failures["diagnostics_log"] =
+                "redacted: contains nearby-device identifiers; not collected without consent"
+            return null
+        }
+        // The sink writes asynchronously off the BLE/GATT threads, so drain any
+        // queued lines to disk before reading the file back.
+        DiagnosticLog.flushFileSink()
+        return readRotatedExternalFile("bada-diagnostics.log", failures, "diagnostics_log")
+    }
+
+    /**
+     * Reads a size-rotated log written by [DiagnosticLog]'s file sink:
+     * the single `<name>.1` backup (older lines) followed by `<name>`
+     * (newer lines), concatenated in chronological order. Returns `null`
+     * and records a failure when neither file exists.
+     */
+    private fun readRotatedExternalFile(
+        fileName: String,
+        failures: MutableMap<String, String>,
+        failureKey: String,
+    ): ByteArray? {
+        val dir = context.getExternalFilesDir(null)
+        val ordered =
+            if (dir == null) {
+                emptyList()
+            } else {
+                listOf(File(dir, "$fileName.1"), File(dir, fileName)).filter { it.exists() }
+            }
+        if (ordered.isEmpty()) {
+            failures[failureKey] = "not_available: $fileName does not exist"
+            return null
+        }
+        return runCatching {
+            ByteArrayOutputStream().use { out ->
+                ordered.forEach { out.write(it.readBytes()) }
+                out.toByteArray()
+            }
+        }.getOrElse { t ->
             failures[failureKey] = "not_available: could not read $fileName (${t.message})"
             null
         }
