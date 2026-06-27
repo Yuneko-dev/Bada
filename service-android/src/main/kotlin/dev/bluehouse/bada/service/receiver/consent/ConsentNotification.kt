@@ -12,6 +12,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import dev.bluehouse.bada.service.R
 
@@ -190,9 +191,11 @@ public object ConsentNotification {
                 .setSmallIcon(android.R.drawable.stat_sys_download)
                 .setContentTitle(content.title)
                 .setContentText(content.body)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(content.bigText))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(NotificationCompat.CATEGORY_CALL)
+                // Tints the DecoratedCustomViewStyle small-icon circle (the
+                // left-side icon) brand blue.
+                .setColor(ConsentThumbnail.LEFT_ICON_TINT)
                 // Dismissing the notification (swipe) does NOT auto-reject
                 // — the peer is left waiting for an explicit decision via
                 // the trampoline activity. This matches NearDrop behaviour
@@ -200,33 +203,48 @@ public object ConsentNotification {
                 .setOngoing(true)
                 .setAutoCancel(false)
                 .setShowWhen(true)
-                .addAction(
-                    NotificationCompat.Action
-                        .Builder(
-                            android.R.drawable.ic_menu_send,
-                            content.acceptLabel,
-                            acceptIntent,
-                        ).build(),
-                ).addAction(
-                    NotificationCompat.Action
-                        .Builder(
-                            android.R.drawable.ic_menu_close_clear_cancel,
-                            content.rejectLabel,
-                            rejectIntent,
-                        ).build(),
+
+        // A custom RemoteViews body (notification_consent) wired with the same
+        // broadcast PendingIntents the standard action buttons would use:
+        // recolored Decline/Accept as a centered pair plus a thumbnail of the
+        // incoming item. DecoratedCustomViewStyle keeps the native notification
+        // frame (small icon, app name, time) and renders our layout as the body
+        // across collapsed / expanded / heads-up. The two consent buttons live
+        // in the layout, so no addAction() row is added (it would duplicate them).
+        val customView =
+            RemoteViews(context.packageName, R.layout.notification_consent).apply {
+                setTextViewText(R.id.notif_consent_title, content.title)
+                setTextViewText(R.id.notif_consent_body, content.body)
+                setTextViewText(R.id.notif_consent_accept, content.acceptLabel)
+                setTextViewText(R.id.notif_consent_decline, content.rejectLabel)
+                setOnClickPendingIntent(R.id.notif_consent_accept, acceptIntent)
+                setOnClickPendingIntent(R.id.notif_consent_decline, rejectIntent)
+                setImageViewBitmap(
+                    R.id.notif_consent_thumb,
+                    ConsentThumbnail.photo(ConsentThumbnail.THUMB_PX, ConsentThumbnail.THUMB_PX),
                 )
+            }
+        builder
+            .setStyle(NotificationCompat.DecoratedCustomViewStyle())
+            .setCustomContentView(customView)
+            .setCustomBigContentView(customView)
+            .setCustomHeadsUpContentView(customView)
 
         if (tapIntent != null) {
-            builder
-                .setContentIntent(tapIntent)
-                // Make sure the heads-up tap routes to the trampoline
-                // activity rather than just expanding the shade. The
-                // full-screen-intent path is what wakes the device on
-                // API 27+; the trampoline activity itself handles the
-                // setShowWhenLocked / setTurnScreenOn flags.
-                // highPriority = true so API 29+ surfaces the activity
-                // immediately rather than collapsing the heads-up.
-                .setFullScreenIntent(tapIntent, true)
+            // Tapping the notification body opens the consent sheet for
+            // details in every style.
+            builder.setContentIntent(tapIntent)
+            // Full-screen-intent on EVERY style so the LOCK-SCREEN / screen-off
+            // behavior is identical for all three: the consent bottom sheet
+            // pops full-screen (incoming-call style). When the device is
+            // UNLOCKED and in use, the platform automatically falls back to a
+            // heads-up — which is the per-style notification (the recolored or
+            // bridge custom RemoteViews, or the plain Accept/Reject for SHEET).
+            // So the style only changes the in-use heads-up; the lock screen is
+            // the same sheet for every option. (Showing the sheet over other
+            // apps WHILE the device is in use is NOT possible via a
+            // full-screen-intent — that requires a draw-over-apps overlay.)
+            builder.setFullScreenIntent(tapIntent, true)
         }
 
         return builder.build()
