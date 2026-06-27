@@ -81,6 +81,15 @@
         android:name="android.permission.POST_NOTIFICATIONS"
         tools:targetApi="33" />
 
+    <!-- Live Updates / promoted-ongoing notifications (Android 16+). Lets the
+         in-flight transfer-progress notification surface in the status-bar
+         chip and OEM dynamic islands (Pixel Live Updates, Xiaomi Hyper Island;
+         OnePlus Live Alerts is currently allowlist-limited). Non-runtime
+         permission; ignored below API 36. -->
+    <uses-permission
+        android:name="android.permission.POST_PROMOTED_NOTIFICATIONS"
+        tools:targetApi="36" />
+
     <!-- Phase 2 BLE auto-discovery permissions (#31). Runtime on API 31+.
          BLUETOOTH_SCAN uses neverForLocation so the platform does not
          require ACCESS_FINE_LOCATION; we do not derive physical location
@@ -322,7 +331,8 @@
         <activity
             android:name=".send.SendActivity"
             android:exported="true"
-            android:label="@string/send_activity_label">
+            android:label="@string/send_activity_label"
+            android:theme="@style/Theme.Bada.SendSheet">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -334,6 +344,19 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+
+        <!--
+          In-app sender screen. Launched ONLY from inside the app
+          (SendReceiveFragment "Send files" / "Send folder") — the original
+          full-screen Bada presentation, NOT the bottom sheet. exported=false +
+          no intent-filter so the system share sheet never routes here; the
+          external ACTION_SEND path stays on the bottom-sheet SendActivity above.
+        -->
+        <activity
+            android:name=".send.SendActivityInApp"
+            android:exported="false"
+            android:label="@string/send_activity_label"
+            android:theme="@style/Theme.Bada.SendInApp" />
 
         <!--
           QR-code display screen launched from SendActivity (#24 + #20).
